@@ -1,0 +1,45 @@
+[Unit]
+Description=GNSS FastAPI Backend Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dyx
+Group=dialout
+WorkingDirectory=/home/dyx/gnss_fastapi_backend
+EnvironmentFile=/home/dyx/gnss_fastapi_backend/.env
+ExecStart=/home/dyx/gnss_fastapi_backend/venv/bin/uvicorn \
+    app.main:app \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --no-access-log
+Restart=always
+RestartSec=10
+
+# Crash loop protection
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# OOM protection — less likely to be killed
+OOMScoreAdjust=-500
+
+# Resource limits
+MemoryMax=512M
+CPUQuota=80%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gnss-backend
+Environment=PYTHONUNBUFFERED=1
+
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/dyx/gnss_fastapi_backend/data
+ReadWritePaths=/home/dyx/gnss_fastapi_backend/.env
+
+[Install]
+WantedBy=multi-user.target

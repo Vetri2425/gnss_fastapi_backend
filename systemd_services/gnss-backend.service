@@ -1,0 +1,27 @@
+[Unit]
+Description=GNSS FastAPI Backend Service
+Documentation=https://github.com/your-org/gnss-fastapi-backend
+After=network.target
+
+[Service]
+Type=simple
+User=gnss
+Group=dialout
+WorkingDirectory=/home/dyx/gnss_fastapi_backend
+Environment="PATH=/home/dyx/gnss_fastapi_backend/venv/bin"
+ExecStart=/home/dyx/gnss_fastapi_backend/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-access-log
+Restart=on-failure
+RestartSec=10
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/home/dyx/gnss_fastapi_backend/data
+PrivateTmp=true
+
+# Serial port access
+# Add the gnss user to the dialout group: sudo usermod -a -G dialout gnss
+
+[Install]
+WantedBy=multi-user.target

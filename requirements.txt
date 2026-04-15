@@ -1,0 +1,33 @@
+# FastAPI + pyubx2 GNSS Backend Requirements
+# Latest versions as of 2026
+
+# Web framework
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# Async WebSocket support
+python-socketio==5.12.1
+python-engineio==4.11.2
+
+# Serial communication
+pyserial==3.5
+pyubx2==1.2.60
+
+# Environment management
+python-dotenv==1.0.1
+
+# Data validation
+pydantic==2.10.4
+pydantic-settings==2.7.0
+
+# HTTP client for NTRIP
+httpx==0.28.1
+
+# Utilities
+async-timeout==5.0.1
+
+# OLED Display (SSD1306 on Raspberry Pi)
+Pillow>=9.0.0
+luma.core>=1.17.0
+luma.oled>=3.4.0
+RPi.GPIO>=0.7.0

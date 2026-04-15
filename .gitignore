@@ -1,0 +1,21 @@
+# Environment
+.env
+.env.*
+!.env.example
+
+# Runtime config (contains credentials)
+data/autoflow_config.json
+data/base_position.json
+data/*.backup.json
+gnss_receiver_config_backup*.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+*.egg-info/
+
+# Logs
+*.log

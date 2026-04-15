@@ -1,0 +1,19 @@
+[Unit]
+Description=OLED Display - DYX_BASE
+After=network.target gnss-backend.service
+Wants=gnss-backend.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/dyx/gnss_fastapi_backend
+Environment=PYTHONPATH=/home/dyx/.local/lib/python3.12/site-packages
+ExecStart=/usr/bin/python3 /home/dyx/gnss_fastapi_backend/app/oled/oled_animation.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=oled-display
+
+[Install]
+WantedBy=multi-user.target
