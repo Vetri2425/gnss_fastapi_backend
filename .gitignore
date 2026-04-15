@@ -5,6 +5,7 @@
 
 # Runtime config (contains credentials)
 data/autoflow_config.json
+data/autoflow_config.json.bak
 data/base_position.json
 data/*.backup.json
 gnss_receiver_config_backup*.json
