@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s -X POST http://localhost:8000/api/v1/lora/start)",
+      "Bash(curl -s http://localhost:8000/api/v1/lora/status)",
+      "Bash(curl -s http://localhost:8000/ntrip)",
+      "Bash(git -C /home/dyx/gnss_fastapi_backend remote add origin https://github.com/Vetri2425/gnss_fastapi_backend.git)",
+      "Bash(git -C /home/dyx/gnss_fastapi_backend remote -v)",
+      "Bash(tar -czf /tmp/DYX_BASE.tar.gz DYX_BASE)",
+      "Bash(tar -czf /tmp/gnss_back.tar.gz gnss_back)",
+      "Bash(tar -czf /tmp/Downloads.tar.gz Downloads)",
+      "Bash(sudo iptables *)",
+      "Read(//proc/sys/net/ipv4/**)",
+      "Read(//etc/dnsmasq.d/**)",
+      "Bash(ping -c 1 -W 2 192.168.4.1)",
+      "Bash(ping -c 1 -W 2 192.168.1.1)",
+      "Bash(ping -c 1 -W 2 8.8.8.8)",
+      "Bash(sudo /usr/local/bin/dyx-hotspot-share.sh status)"
+    ],
+    "additionalDirectories": [
+      "/media/dyx/AGENT-25",
+      "/home/dyx/DYX_BASE"
+    ]
+  }
+}

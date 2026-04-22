@@ -18,5 +18,8 @@ venv/
 .venv/
 *.egg-info/
 
+# Runtime save files
+data/*.save
+
 # Logs
 *.log

@@ -126,6 +126,7 @@ class NTRIPStatus(BaseModel):
     bytes_sent: int = Field(0, description="Bytes sent to caster")
     bytes_received: int = Field(0, description="Bytes received from caster")
     uptime: float = Field(0.0, description="Connection uptime in seconds")
+    data_rate_bps: float = Field(0.0, description="Current data rate in bits per second")
     error_message: Optional[str] = Field(None, description="Last error message")
 
     class Config:
@@ -139,6 +140,7 @@ class NTRIPStatus(BaseModel):
                 "bytes_sent": 15000,
                 "bytes_received": 250000,
                 "uptime": 3600.5,
+                "data_rate_bps": 1024.5,
                 "error_message": None,
             }
         }

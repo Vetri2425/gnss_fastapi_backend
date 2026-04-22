@@ -168,6 +168,7 @@ async def get_full_status() -> dict[str, Any]:
             "bytes_sent": live_ntrip.get("bytes_sent", 0),
             "bytes_received": live_ntrip.get("bytes_received", 0),
             "uptime": live_ntrip.get("uptime", 0.0),
+            "data_rate_bps": live_ntrip.get("data_rate_bps", 0.0),
             "error_message": live_ntrip.get("last_error"),
             "in_cooldown": live_ntrip.get("in_cooldown", False),
             "cooldown_remaining_seconds": live_ntrip.get("cooldown_remaining_seconds"),

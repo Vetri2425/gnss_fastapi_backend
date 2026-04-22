@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 
 _CONFIG_FILE: Path = Config.DATA_DIR / "autoflow_config.json"
 _BASE_POSITION_FILE: Path = Config.DATA_DIR / "base_position.json"
-_LOCATION_CHANGE_THRESHOLD_M: float = 100.0  # metres
+_LOCATION_CHANGE_THRESHOLD_M: float = 10000.0  # metres
 _AWAITING_CONFIRM_TIMEOUT_S: float = 300.0   # 5 minutes
 
 

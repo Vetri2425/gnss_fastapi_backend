@@ -25,12 +25,16 @@ W, H = 128, 64  # Default SSD1306 dimensions
 # -- Shared state (updated by background fetcher thread) ------------------------
 _state = {
     "4g_ip":         None,
-    "4g_signal":     None,   # int 0-5, or None
+    "4g_signal":     None,   # int 0-5, or None (cellular signal)
+    "eth_ip":        None,   # Ethernet IP (eth0, eth1, etc.)
+    "conn_type":     None,   # "4G" or "ETH" or None
     "position":      {},     # From /api/v1/status.position
     "survey":        {},     # From /api/v1/status.survey
     "rtcm":          {},     # From /api/v1/status.rtcm
     "ntrip":         {},     # From /api/v1/status.ntrip
     "autoflow":      {},     # From /api/v1/autoflow/status (state, enabled, last_error)
+    "base_reference": {},    # From /api/v1/status/base-reference (fixed_reference.mode)
+    "saved_position": {},    # From /api/v1/base/saved-position (position.accuracy)
     "last_fetch":    0,
     "fetch_ok":      False,
 }
@@ -41,14 +45,36 @@ _state_lock = threading.Lock()
 def _fetch_once():
     """Fetch all required data from FastAPI backend in one shot"""
 
-    # 4G IP
+    # 4G IP (cellular ppp0)
+    ip_4g = None
     try:
         out = subprocess.check_output(
             "ip -4 addr show ppp0 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1",
             shell=True, text=True, timeout=2).strip()
-        ip = out or None
+        ip_4g = out or None
     except Exception:
-        ip = None
+        ip_4g = None
+
+    # Ethernet IP (eth0, eth1, eth2, wlan0)
+    ip_eth = None
+    try:
+        out = subprocess.check_output(
+            "ip -4 addr show | grep -E 'inet.*(eth0|eth1|eth2|wlan0)' | awk '{print $2}' | cut -d/ -f1 | head -1",
+            shell=True, text=True, timeout=2).strip()
+        ip_eth = out or None
+    except Exception:
+        ip_eth = None
+
+    # Determine active connection type and IP (prefer ETH, fallback to 4G)
+    if ip_eth:
+        active_ip = ip_eth
+        conn_type = "ETH"
+    elif ip_4g:
+        active_ip = ip_4g
+        conn_type = "4G"
+    else:
+        active_ip = None
+        conn_type = None
 
     # ===== SINGLE API CALL: /api/v1/status (contains position, survey, rtcm, ntrip) =====
     full_status = {}
@@ -72,31 +98,55 @@ def _fetch_once():
     except Exception:
         pass
 
-    # 4G signal strength (via mmcli, fall back to 4/5 when connected)
-    sig = None
+    # ===== THIRD API CALL: /api/v1/status/base-reference (fixed_reference.mode) =====
+    base_reference = {}
     try:
-        out = subprocess.check_output(
-            "mmcli -m 0 --simple-status 2>/dev/null | grep signal | grep -o '[0-9]*' | head -1",
-            shell=True, text=True, timeout=3).strip()
-        if out:
-            pct = int(out)
-            sig = round(pct / 20)  # 0-100 -> 0-5 bars
+        r = urllib.request.urlopen("http://localhost:8000/api/v1/status/base-reference", timeout=2)
+        base_reference = json.loads(r.read())
     except Exception:
         pass
-    # If ppp0 has IP but mmcli unavailable, default to 4/5 bars
-    if sig is None and ip:
-        sig = 4
+
+    # ===== FOURTH API CALL: /api/v1/base/saved-position (position.accuracy) =====
+    saved_position = {}
+    try:
+        r = urllib.request.urlopen("http://localhost:8000/api/v1/base/saved-position", timeout=2)
+        saved_position = json.loads(r.read())
+    except Exception:
+        pass
+
+    # 4G signal strength (via mmcli, only for cellular)
+    sig = None
+    if conn_type == "4G":
+        try:
+            out = subprocess.check_output(
+                "mmcli -m 0 --simple-status 2>/dev/null | grep signal | grep -o '[0-9]*' | head -1",
+                shell=True, text=True, timeout=3).strip()
+            if out:
+                pct = int(out)
+                sig = round(pct / 20)  # 0-100 -> 0-5 bars
+        except Exception:
+            pass
+        # If 4G connected but mmcli unavailable, default to 4/5 bars
+        if sig is None and ip_4g:
+            sig = 4
+    # For ethernet, no signal bars (show 5/5 as "connected")
+    elif conn_type == "ETH":
+        sig = 5
 
     with _state_lock:
-        _state["4g_ip"]      = ip
-        _state["4g_signal"]  = sig
-        _state["position"]   = position
-        _state["survey"]     = survey
-        _state["rtcm"]       = rtcm
-        _state["ntrip"]      = ntrip
-        _state["autoflow"]   = autoflow
-        _state["last_fetch"] = time.time()
-        _state["fetch_ok"]   = True
+        _state["4g_ip"]         = ip_4g
+        _state["4g_signal"]     = sig
+        _state["eth_ip"]        = ip_eth
+        _state["conn_type"]     = conn_type
+        _state["position"]      = position
+        _state["survey"]        = survey
+        _state["rtcm"]          = rtcm
+        _state["ntrip"]         = ntrip
+        _state["autoflow"]      = autoflow
+        _state["base_reference"] = base_reference
+        _state["saved_position"] = saved_position
+        _state["last_fetch"]    = time.time()
+        _state["fetch_ok"]      = True
 
 
 def _fetcher_loop():
@@ -248,8 +298,16 @@ def draw_gnss(draw, st):
     data = st.get("position", {})
     fix  = data.get("fix_type_str", "no_fix") or "no_fix"  # IMPORTANT: API uses fix_type_str
     sats = data.get("num_satellites", 0) or 0
-    hacc = data.get("accuracy", 0) or 0
     alt  = data.get("altitude", 0) or 0
+
+    # Get base mode and saved position accuracy
+    base_ref = st.get("base_reference", {})
+    fixed_ref = base_ref.get("fixed_reference", {})
+    base_mode = fixed_ref.get("mode", "")
+
+    saved_pos = st.get("saved_position", {})
+    saved_data = saved_pos.get("position", {})
+    base_acc = saved_data.get("accuracy", 0) or 0
 
     draw.rectangle([0, 0, W - 1, H - 1], outline="white")
     # Header
@@ -269,12 +327,11 @@ def draw_gnss(draw, st):
 
     draw.line([(0, 50), (W, 50)], fill="white")
 
-    # Bottom row: accuracy + altitude
-    hacc_txt = f"hAcc {hacc:.3f}m" if hacc else "hAcc --"
-    alt_txt  = f"{alt:.1f}m" if alt else ""
-    draw.text((2, 53), hacc_txt, fill="white")
-    if alt_txt:
-        draw.text((90, 53), alt_txt, fill="white")
+    # Bottom row: base accuracy (from saved position) + base mode (SURVEY/FIXED)
+    base_acc_txt = f"Base {base_acc:.3f}m" if base_acc else "Base --"
+    mode_txt = f"{base_mode}" if base_mode else "UNKNOWN"
+    draw.text((2, 53), base_acc_txt, fill="white")
+    draw.text((85, 53), mode_txt, fill="white")
 
 
 # -- Screen: 4G -- signal bars -------------------------------------------------
@@ -294,27 +351,44 @@ def _draw_signal_bars_inline(draw, x, y, level, max_bars=5):
 
 
 def draw_4g(draw, st):
-    ip  = st.get("4g_ip")
+    ip_4g = st.get("4g_ip")
+    ip_eth = st.get("eth_ip")
+    conn_type = st.get("conn_type")
     sig = st.get("4g_signal")
-    level = sig if sig is not None else (4 if ip else 0)
+    level = sig if sig is not None else 0
+
+    # Determine active IP and connection label
+    if conn_type == "ETH":
+        active_ip = ip_eth
+        conn_label = "ETHERNET"
+    elif conn_type == "4G":
+        active_ip = ip_4g
+        conn_label = "4G LTE"
+    else:
+        active_ip = None
+        conn_label = "OFFLINE"
 
     draw.rectangle([0, 0, W - 1, H - 1], outline="white")
 
-    # Row 1: "4G LTE" label + signal bars inline + signal count
-    draw.text((2, 2), "4G LTE", fill="white")
-    _draw_signal_bars_inline(draw, x=52, y=2, level=level)
-    draw.text((96, 2), f"{level}/5", fill="white")
+    # Row 1: Connection type label + signal bars (if 4G) + signal count
+    draw.text((2, 2), conn_label, fill="white")
+    if conn_type == "4G":
+        _draw_signal_bars_inline(draw, x=52, y=2, level=level)
+        draw.text((96, 2), f"{level}/5", fill="white")
+    elif conn_type == "ETH":
+        draw.text((96, 2), "LINK", fill="white")
 
     draw.line([(0, 16), (W, 16)], fill="white")
 
     # Row 2: STATUS label left, value right on same line
-    status_txt = "ONLINE" if ip else "OFFLINE"
+    status_txt = "ONLINE" if active_ip else "OFFLINE"
     draw.text((4, 26), "STATUS", fill="white")
     draw.text((62, 26), status_txt, fill="white")
 
     # Row 3: IP label left, address right on same line
+    ip_display = active_ip if active_ip else "No connection"
     draw.text((4, 42), "IP", fill="white")
-    draw.text((22, 42), ip if ip else "No PPP", fill="white")
+    draw.text((22, 42), ip_display, fill="white")
 
 
 # -- Screen: NTRIP Caster ------------------------------------------------------

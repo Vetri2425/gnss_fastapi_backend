@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(portal.u-blox.com)",
+      "WebFetch(mowerproject.com)",
+      "WebFetch(gpswebshop.com)"
+    ]
+  },
+  "$version": 3
+}
