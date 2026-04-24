@@ -835,21 +835,31 @@ class AutoflowOrchestrator:
             )
             self._start_ntrip(cfg)
 
-            # Allow the initial attempt, backoff, and a retry before timing out.
-            deadline = time.time() + 90.0
+            # Wait for NTRIP — no hard deadline; the client retries
+            # indefinitely with backoff (5s → 60s) and a 10-min cooldown
+            # cycle. Base station RTCM keeps flowing on serial regardless.
+            _connect_log_time = 0.0
             while not self._halted():
                 with self._lock:
                     connected = self._ntrip_client.connected if self._ntrip_client else False
                 if connected:
                     break
-                if time.time() > deadline:
-                    with self._lock:
-                        self._failed_from_state = AutoflowState.NTRIP_CONNECT
-                        self._state = AutoflowState.FAILED
-                        self._last_error = "NTRIP connection timeout (90 s)"
-                    logger.error("[AUTOFLOW] NTRIP connection timed out after 90 s")
-                    self._emit("autoflow_state", self._status_dict())
-                    return
+
+                # Periodic status so operator knows it's still trying
+                now = time.time()
+                if now - _connect_log_time >= 30.0:
+                    if self._ntrip_client:
+                        st = self._ntrip_client.get_status()
+                        logger.info(
+                            f"[AUTOFLOW] Waiting for NTRIP connection  "
+                            f"attempts={st.get('connect_attempts', 0)}  "
+                            f"cooldown={'yes' if st.get('in_cooldown') else 'no'}  "
+                            f"error={st.get('last_error', '')[:80]}"
+                        )
+                    else:
+                        logger.info("[AUTOFLOW] Waiting for NTRIP client...")
+                    _connect_log_time = now
+
                 self._stop_event.wait(timeout=1.0)
 
             if self._halted():

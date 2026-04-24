@@ -12,6 +12,7 @@ from any thread (the GNSSReader serial thread).
 import base64
 import logging
 import queue
+import random
 import select
 import socket
 import struct
@@ -110,7 +111,7 @@ class NTRIPPushClient:
         try:
             self._rtcm_queue.put_nowait(data)
         except queue.Full:
-            pass
+            logger.warning("[NTRIP] RTCM queue full — frame dropped (network can't keep up)")
 
     def start(self) -> None:
         """Start the push thread (idempotent)."""
@@ -224,15 +225,17 @@ class NTRIPPushClient:
                 # Loop continues — will attempt reconnect
                 continue
 
-            # Exponential backoff
-            delay = min(self.base_delay * (2 ** min(self._session_attempts, 6)), self.max_delay)
+            # Exponential backoff with ±20% jitter to prevent thundering herd
+            base = min(self.base_delay * (2 ** min(self._session_attempts, 6)), self.max_delay)
+            delay = base * random.uniform(0.8, 1.2)
             logger.info(f"[NTRIP] Reconnecting in {delay:.1f}s...")
             self._stop_event.wait(timeout=delay)
 
     def _connect(self) -> None:
         self._session_attempts += 1
         self.connect_attempts += 1
-        versions = [self.ntrip_version]
+        # Try v2 first (HTTP POST), fall back to v1 (SOURCE method)
+        versions = [2, 1] if self.ntrip_version != 2 else [2]
 
         errors: list[str] = []
         for version in versions:
@@ -240,9 +243,9 @@ class NTRIPPushClient:
                 f"[NTRIP] Connecting to {self.host}:{self.port}/{self.mountpoint} "
                 f"(NTRIP {version}.0, session attempt {self._session_attempts})"
             )
-            self._sock = socket.create_connection((self.host, self.port), timeout=10)
-            self._configure_socket(self._sock)
             try:
+                self._sock = socket.create_connection((self.host, self.port), timeout=10)
+                self._configure_socket(self._sock)
                 if version == 2:
                     self._handshake_v2()
                 else:
@@ -252,7 +255,10 @@ class NTRIPPushClient:
             except Exception as exc:
                 errors.append(f"v{version}: {exc}")
                 self._close_socket()
-                raise ConnectionError("; ".join(errors)) from exc
+                # Try next version, if any
+        else:
+            # All versions exhausted
+            raise ConnectionError("; ".join(errors))
 
         self._connected = True
         self._connected_since = time.monotonic()
