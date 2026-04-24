@@ -15,7 +15,9 @@
       "Bash(ping -c 1 -W 2 192.168.4.1)",
       "Bash(ping -c 1 -W 2 192.168.1.1)",
       "Bash(ping -c 1 -W 2 8.8.8.8)",
-      "Bash(sudo /usr/local/bin/dyx-hotspot-share.sh status)"
+      "Bash(sudo /usr/local/bin/dyx-hotspot-share.sh status)",
+      "Bash(journalctl -u gnss-backend.service -n 20 --no-pager)",
+      "Bash(journalctl -u gnss-backend.service --no-pager)"
     ],
     "additionalDirectories": [
       "/media/dyx/AGENT-25",

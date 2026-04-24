@@ -43,7 +43,7 @@ import socketio
 
 from app.config import Config
 from app.gnss.commands import GNSSCommands
-from app.gnss.geodesy import ecef_distance
+from app.gnss.geodesy import ecef_distance, ecef_to_llh, llh_distance
 
 if TYPE_CHECKING:
     from app.gnss.lora_push import LoRaPushClient
@@ -277,7 +277,9 @@ class AutoflowOrchestrator:
         try:
             if _BASE_POSITION_FILE.exists():
                 data = json.loads(_BASE_POSITION_FILE.read_text())
-                if all(k in data for k in ("ecef_x", "ecef_y", "ecef_z")):
+                has_ecef = all(k in data for k in ("ecef_x", "ecef_y", "ecef_z"))
+                has_llh = all(k in data for k in ("latitude", "longitude", "altitude"))
+                if has_ecef or has_llh:
                     return data
         except Exception as e:
             logger.warning(f"[AUTOFLOW] Failed to load base_position.json: {e}")
@@ -285,20 +287,52 @@ class AutoflowOrchestrator:
 
     def _save_base_position(self, ecef_x: float, ecef_y: float,
                             ecef_z: float, accuracy: float) -> None:
-        """Save surveyed ECEF to data/base_position.json."""
+        """Save surveyed ECEF + derived LLH to data/base_position.json."""
         try:
             from datetime import datetime, timezone
+            lat, lon, alt = ecef_to_llh(ecef_x, ecef_y, ecef_z)
             data = {
                 "ecef_x": ecef_x,
                 "ecef_y": ecef_y,
                 "ecef_z": ecef_z,
+                "latitude": lat,
+                "longitude": lon,
+                "altitude": alt,
                 "accuracy": accuracy,
                 "surveyed_at": datetime.now(timezone.utc).isoformat(),
             }
             _BASE_POSITION_FILE.write_text(json.dumps(data, indent=2))
             logger.info(
                 f"[AUTOFLOW] Base position saved: "
-                f"X={ecef_x:.3f} Y={ecef_y:.3f} Z={ecef_z:.3f} "
+                f"lat={lat:.8f} lon={lon:.8f} alt={alt:.3f}m "
+                f"acc={accuracy:.3f}m"
+            )
+        except Exception as e:
+            logger.error(f"[AUTOFLOW] Failed to save base_position.json: {e}")
+
+    def _save_base_position_llh(self, latitude: float, longitude: float,
+                                altitude: float, accuracy: float) -> None:
+        """Save manually-applied LLH to data/base_position.json (no ECEF needed)."""
+        if latitude == 0.0 and longitude == 0.0:
+            logger.warning("[AUTOFLOW] Refusing to save base_position.json — coordinates are 0,0 (null island)")
+            return
+        if abs(latitude) == 90.0 and abs(longitude) == 180.0:
+            logger.warning("[AUTOFLOW] Refusing to save base_position.json — coordinates look like unset defaults")
+            return
+        try:
+            from datetime import datetime, timezone
+            data = {
+                "latitude": latitude,
+                "longitude": longitude,
+                "altitude": altitude,
+                "accuracy": accuracy,
+                "source": "manual_fixed",
+                "surveyed_at": datetime.now(timezone.utc).isoformat(),
+            }
+            _BASE_POSITION_FILE.write_text(json.dumps(data, indent=2))
+            logger.info(
+                f"[AUTOFLOW] Base position saved (manual): "
+                f"lat={latitude:.8f} lon={longitude:.8f} alt={altitude:.3f}m "
                 f"acc={accuracy:.3f}m"
             )
         except Exception as e:
@@ -501,6 +535,9 @@ class AutoflowOrchestrator:
         logger.info("[AUTOFLOW] Receiver reset — starting fresh survey")
 
         # ── Phase 1c: Check saved base position ──────────────────────────
+        # Site-awareness (distance check / AWAITING_CONFIRM) is intentionally
+        # disabled. If a saved position exists it is used immediately.
+        # To force a fresh survey the user must delete base_position.json.
         self._set_state(AutoflowState.CHECKING_POSITION)
         self._emit("autoflow_state", self._status_dict())
 
@@ -508,90 +545,53 @@ class AutoflowOrchestrator:
         use_saved = False
 
         if saved:
-            # Wait for a 3D fix to compare position (max 60s)
-            logger.info("[AUTOFLOW] Saved base position found — waiting for 3D fix to verify location")
-            fix_deadline = time.monotonic() + 60.0
-            got_fix = False
-            while not self._halted() and time.monotonic() < fix_deadline:
-                pos = self.gnss_state.position
-                if pos.fix_type == 3:  # 3D fix
-                    got_fix = True
-                    break
-                self._stop_event.wait(timeout=2.0)
-
-            if got_fix and not self._halted():
-                pos = self.gnss_state.position
-                # Convert current LLH position to ECEF for comparison
-                import math
-                lat_r = math.radians(pos.latitude)
-                lon_r = math.radians(pos.longitude)
-                a = 6378137.0
-                f = 1 / 298.257223563
-                e2 = 2 * f - f * f
-                N = a / math.sqrt(1 - e2 * math.sin(lat_r) ** 2)
-                cur_x = (N + pos.altitude) * math.cos(lat_r) * math.cos(lon_r)
-                cur_y = (N + pos.altitude) * math.cos(lat_r) * math.sin(lon_r)
-                cur_z = (N * (1 - e2) + pos.altitude) * math.sin(lat_r)
-
-                dist = ecef_distance(
-                    cur_x, cur_y, cur_z,
-                    saved["ecef_x"], saved["ecef_y"], saved["ecef_z"]
+            if all(k in saved for k in ("latitude", "longitude", "altitude")):
+                logger.info(
+                    f"[AUTOFLOW] Saved base position found — applying directly "
+                    f"(lat={saved['latitude']:.7f} lon={saved['longitude']:.7f} "
+                    f"alt={saved['altitude']:.3f}m acc={saved.get('accuracy', '?')}m)"
                 )
-                logger.info(f"[AUTOFLOW] Distance from saved position: {dist:.1f}m (threshold: {_LOCATION_CHANGE_THRESHOLD_M}m)")
-
-                if dist < _LOCATION_CHANGE_THRESHOLD_M:
-                    logger.info("[AUTOFLOW] Same site detected — using saved base position")
-                    use_saved = True
-                else:
-                    # Location changed — notify frontend, wait for confirm
-                    logger.warning(f"[AUTOFLOW] Location changed by {dist:.1f}m — notifying frontend")
-                    self._set_state(AutoflowState.AWAITING_CONFIRM)
-                    with self._lock:
-                        self._location_change_distance = dist
-                        self._location_change_deadline = time.monotonic() + _AWAITING_CONFIRM_TIMEOUT_S
-                    self._confirm_resurvey.clear()
-                    self._skip_resurvey.clear()
-                    self._emit("location_changed", {
-                        "distance_metres": round(dist, 1),
-                        "saved_position": saved,
-                        "current_ecef": {
-                            "x": round(cur_x, 3),
-                            "y": round(cur_y, 3),
-                            "z": round(cur_z, 3),
-                        },
-                        "auto_resurvey_in_seconds": int(_AWAITING_CONFIRM_TIMEOUT_S),
-                    })
-
-                    # Wait for user or timeout
-                    deadline = time.monotonic() + _AWAITING_CONFIRM_TIMEOUT_S
-                    while not self._halted() and time.monotonic() < deadline:
-                        if self._confirm_resurvey.is_set():
-                            logger.info("[AUTOFLOW] User confirmed resurvey")
-                            break
-                        if self._skip_resurvey.is_set():
-                            logger.info("[AUTOFLOW] User skipped resurvey — using saved position")
-                            use_saved = True
-                            break
-                        self._stop_event.wait(timeout=5.0)
-                    else:
-                        if not self._halted():
-                            logger.warning("[AUTOFLOW] 15min timeout — auto-resurveying")
-                    
-                    # Clear location change data when exiting AWAITING_CONFIRM
-                    with self._lock:
-                        self._location_change_distance = None
-                        self._location_change_deadline = None
+                use_saved = True
             else:
-                logger.warning("[AUTOFLOW] No 3D fix in 60s — proceeding to survey")
+                logger.warning("[AUTOFLOW] Saved file missing LLH fields — falling back to survey")
+
+        # ── SITE-AWARENESS (commented out — re-enable if location checking needed) ──
+        # if saved:
+        #     # Wait for a 3D fix to compare position (max 60s)
+        #     fix_deadline = time.monotonic() + 60.0
+        #     got_fix = False
+        #     while not self._halted() and time.monotonic() < fix_deadline:
+        #         pos = self.gnss_state.position
+        #         if pos.fix_type == 3:
+        #             got_fix = True
+        #             break
+        #         self._stop_event.wait(timeout=2.0)
+        #     if got_fix and not self._halted():
+        #         pos = self.gnss_state.position
+        #         dist = llh_distance(
+        #             pos.latitude, pos.longitude, pos.altitude,
+        #             saved["latitude"], saved["longitude"], saved["altitude"],
+        #         )
+        #         if dist < _LOCATION_CHANGE_THRESHOLD_M:
+        #             use_saved = True
+        #         else:
+        #             self._set_state(AutoflowState.AWAITING_CONFIRM)
+        #             self._emit("location_changed", {...})
+        #             # wait loop for confirm_resurvey / skip_resurvey / timeout
+        #     else:
+        #         logger.warning("[AUTOFLOW] No 3D fix in 60s — proceeding to survey")
 
         # ── Apply saved position or proceed to survey ─────────────────────
         if use_saved and not self._halted():
             logger.info("[AUTOFLOW] Applying saved base position directly")
             self._set_state(AutoflowState.APPLY_FIXED_BASE)
-            fixed_cmd = GNSSCommands.create_fixed_mode_command(
-                ecef_x=saved["ecef_x"],
-                ecef_y=saved["ecef_y"],
-                ecef_z=saved["ecef_z"],
+            from pyubx2 import SET_LAYER_RAM, SET_LAYER_BBR
+            fixed_cmd = GNSSCommands.create_fixed_llh_command(
+                latitude=saved["latitude"],
+                longitude=saved["longitude"],
+                height=saved["altitude"],
+                fixed_pos_acc=saved.get("accuracy", 0.10),
+                layers=SET_LAYER_RAM | SET_LAYER_BBR,
             )
             fixed_ack = self.gnss_reader.send_command_and_wait_ack(fixed_cmd, timeout=8.0)
             if fixed_ack is not True:
@@ -600,14 +600,17 @@ class AutoflowOrchestrator:
             else:
                 logger.info(
                     f"[AUTOFLOW] Fixed base applied from saved position: "
-                    f"X={saved['ecef_x']:.3f} Y={saved['ecef_y']:.3f} Z={saved['ecef_z']:.3f}"
+                    f"lat={saved['latitude']:.7f} lon={saved['longitude']:.7f} alt={saved['altitude']:.3f}m"
                 )
                 self.gnss_state.update_base_reference(
                     mode="FIXED",
                     source="saved_position",
-                    ecef_x=saved["ecef_x"],
-                    ecef_y=saved["ecef_y"],
-                    ecef_z=saved["ecef_z"],
+                    latitude=saved["latitude"],
+                    longitude=saved["longitude"],
+                    height_ellipsoid=saved["altitude"],
+                    ecef_x=saved.get("ecef_x"),
+                    ecef_y=saved.get("ecef_y"),
+                    ecef_z=saved.get("ecef_z"),
                     fixed_pos_acc=saved.get("accuracy", 0.10),
                     rtcm_enabled=False,
                     save_to_flash=False,

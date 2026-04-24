@@ -53,3 +53,29 @@ def ecef_distance(
     """
     import math
     return math.sqrt((x2 - x1)**2 + (y2 - y1)**2 + (z2 - z1)**2)
+
+
+def llh_distance(
+    lat1: float, lon1: float, alt1: float,
+    lat2: float, lon2: float, alt2: float,
+) -> float:
+    """
+    3-D distance in metres between two WGS84 LLH points.
+    Converts both to ECEF then uses Euclidean distance.
+    Accurate for any separation; no flat-earth approximation.
+    """
+    from math import radians, sin, cos, sqrt
+    def to_ecef(lat_deg, lon_deg, h):
+        lat = radians(lat_deg)
+        lon = radians(lon_deg)
+        sin_lat = sin(lat)
+        n = WGS84_A / sqrt(1 - WGS84_E2 * sin_lat * sin_lat)
+        cos_lat = cos(lat)
+        x = (n + h) * cos_lat * cos(lon)
+        y = (n + h) * cos_lat * sin(lon)
+        z = (n * (1 - WGS84_E2) + h) * sin_lat
+        return x, y, z
+
+    x1, y1, z1 = to_ecef(lat1, lon1, alt1)
+    x2, y2, z2 = to_ecef(lat2, lon2, alt2)
+    return sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2 + (z2 - z1) ** 2)

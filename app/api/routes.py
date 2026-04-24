@@ -918,6 +918,7 @@ async def configure_fixed_base(request: FixedBaseRequest) -> FixedBaseResponse:
             timeout=8.0,
             require_ack=True,
         )
+        time.sleep(0.5)
 
         # Step 4: Optionally re-enable RTCM output
         rtcm_enabled = False
@@ -977,6 +978,15 @@ async def configure_fixed_base(request: FixedBaseRequest) -> FixedBaseResponse:
             rtcm_enabled=rtcm_enabled,
             save_to_flash=request.save_to_flash,
         )
+
+        # Persist so next reboot autoflow uses these coordinates directly (no resurvey)
+        if orch is not None:
+            orch._save_base_position_llh(
+                latitude=request.latitude,
+                longitude=request.longitude,
+                altitude=height_ellipsoid,
+                accuracy=request.fixed_pos_acc,
+            )
 
         return FixedBaseResponse(
             success=True,
