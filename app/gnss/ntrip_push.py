@@ -65,6 +65,7 @@ class NTRIPPushClient:
         self._thread: Optional[threading.Thread] = None
         self._give_up = False
         self._failure_count = 0
+        self._perm_error_count = 0
 
         # Connection callbacks — set by autoflow orchestrator
         self._on_connected: Optional[Callable[[], None]] = None
@@ -81,6 +82,8 @@ class NTRIPPushClient:
         self._connected_since: float = 0.0
         self._first_frame_logged: bool = False
         self._last_stats_log: float = 0.0
+        self._dns_fail_count: int = 0
+        self._last_queue_full_log: float = 0.0
 
         # Data rate tracking
         self._bytes_in_window: int = 0
@@ -111,7 +114,10 @@ class NTRIPPushClient:
         try:
             self._rtcm_queue.put_nowait(data)
         except queue.Full:
-            logger.warning("[NTRIP] RTCM queue full — frame dropped (network can't keep up)")
+            now = time.monotonic()
+            if now - self._last_queue_full_log >= 30.0:
+                logger.warning("[NTRIP] RTCM queue full — frames dropping (network not ready)")
+                self._last_queue_full_log = now
 
     def start(self) -> None:
         """Start the push thread (idempotent)."""
@@ -179,11 +185,46 @@ class NTRIPPushClient:
 
     def _run_loop(self) -> None:
         while not self._stop_event.is_set():
+            _was_dns_error = False
+            _was_perm_error = False
             try:
                 self._connect()
                 self._session_attempts = 0
                 self._failure_count = 0
+                self._dns_fail_count = 0
+                self._perm_error_count = 0
                 self._push_loop()
+            except PermissionError as e:
+                # 401/403 from caster — could be wrong credentials OR a caster-side
+                # holddown on the mountpoint after a fast service restart.
+                # Retry up to 3 times (90 s apart) before giving up permanently;
+                # a real credential error will keep returning 401 on every attempt.
+                self.last_error = str(e)
+                self._connected = False
+                self._perm_error_count += 1
+                if self._perm_error_count >= 3:
+                    self._give_up = True
+                    logger.error(
+                        f"[NTRIP] Auth rejected {self._perm_error_count} times — "
+                        f"stopping permanently. Fix credentials and restart. ({e})"
+                    )
+                    return
+                _was_perm_error = True
+                logger.warning(
+                    f"[NTRIP] Auth rejected (attempt {self._perm_error_count}/3) — "
+                    f"may be caster holddown after restart, retrying in 90s. ({e})"
+                )
+            except socket.gaierror as e:
+                # DNS / name resolution failure — network not ready after boot or modem reset.
+                # Do NOT count toward max_retries; use flat 30 s wait so the caster cooldown
+                # is not triggered by a local network outage.
+                _was_dns_error = True
+                self.last_error = str(e)
+                self._connected = False
+                self._dns_fail_count += 1
+                logger.warning(
+                    f"[NTRIP] DNS failed (network offline? dns_fail={self._dns_fail_count}): {e}"
+                )
             except Exception as e:
                 self.last_error = str(e)
                 self._connected = False
@@ -194,6 +235,18 @@ class NTRIPPushClient:
 
             if self._stop_event.is_set():
                 break
+
+            # DNS failure: flat 30 s wait, then retry — never enters cooldown
+            if _was_dns_error:
+                logger.info("[NTRIP] Waiting 30s for network/DNS to recover...")
+                self._stop_event.wait(timeout=30.0)
+                continue
+
+            # Possible caster holddown after fast restart: flat 90 s wait, then retry
+            if _was_perm_error:
+                logger.info("[NTRIP] Waiting 90s for caster to release mountpoint...")
+                self._stop_event.wait(timeout=90.0)
+                continue
 
             if self.max_retries > 0 and self._failure_count >= self.max_retries:
                 # NTRIP max retries reached — enter 10-minute cooldown before retry
@@ -234,10 +287,16 @@ class NTRIPPushClient:
     def _connect(self) -> None:
         self._session_attempts += 1
         self.connect_attempts += 1
-        # Try v2 first (HTTP POST), fall back to v1 (SOURCE method)
-        versions = [2, 1] if self.ntrip_version != 2 else [2]
+        # Respect explicit version config; only auto-detect (v2→v1) when version is 0/unknown
+        if self.ntrip_version == 2:
+            versions = [2]
+        elif self.ntrip_version == 1:
+            versions = [1]
+        else:
+            versions = [2, 1]  # auto: try v2 first, fall back to v1
 
         errors: list[str] = []
+        raw_errors: list[Exception] = []
         for version in versions:
             logger.info(
                 f"[NTRIP] Connecting to {self.host}:{self.port}/{self.mountpoint} "
@@ -254,10 +313,16 @@ class NTRIPPushClient:
                 break
             except Exception as exc:
                 errors.append(f"v{version}: {exc}")
+                raw_errors.append(exc)
                 self._close_socket()
                 # Try next version, if any
         else:
-            # All versions exhausted
+            # All versions exhausted — preserve the specific error type so _run_loop
+            # can route DNS failures and auth failures to their own recovery paths.
+            if raw_errors and all(isinstance(e, socket.gaierror) for e in raw_errors):
+                raise raw_errors[0]
+            if raw_errors and all(isinstance(e, PermissionError) for e in raw_errors):
+                raise raw_errors[0]
             raise ConnectionError("; ".join(errors))
 
         self._connected = True
@@ -297,6 +362,8 @@ class NTRIPPushClient:
         self._sock.sendall(request.encode("ascii"))
         response = self._recv_handshake_response()
         first_line = response.splitlines()[0] if response else ""
+        if "401" in first_line or "403" in first_line:
+            raise PermissionError(f"NTRIP 1.0 auth rejected (will not retry): {first_line.strip()!r}")
         if "ICY 200 OK" not in response and "HTTP/1.0 200" not in first_line and "HTTP/1.1 200" not in first_line:
             raise ConnectionError(f"NTRIP 1.0 rejected: {response.strip()!r}")
 
@@ -318,6 +385,8 @@ class NTRIPPushClient:
         self._sock.sendall(request.encode("ascii"))
         response = self._recv_handshake_response()
         first_line = response.splitlines()[0] if response else ""
+        if "401" in first_line or "403" in first_line:
+            raise PermissionError(f"NTRIP 2.0 auth rejected (will not retry): {first_line.strip()!r}")
         if "HTTP/1.0 200" not in first_line and "HTTP/1.1 200" not in first_line:
             raise ConnectionError(f"NTRIP 2.0 rejected: {response.strip()!r}")
 

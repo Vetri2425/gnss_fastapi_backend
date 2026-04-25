@@ -854,7 +854,7 @@ class AutoflowOrchestrator:
                             f"[AUTOFLOW] Waiting for NTRIP connection  "
                             f"attempts={st.get('connect_attempts', 0)}  "
                             f"cooldown={'yes' if st.get('in_cooldown') else 'no'}  "
-                            f"error={st.get('last_error', '')[:80]}"
+                            f"error={(st.get('last_error') or '')[:80]}"
                         )
                     else:
                         logger.info("[AUTOFLOW] Waiting for NTRIP client...")
@@ -911,8 +911,11 @@ class AutoflowOrchestrator:
                     if status.get("stale") and self._state == AutoflowState.STREAMING:
                         logger.warning("[AUTOFLOW] NTRIP stale — no data for >30s, reconnecting")
                         client.stop()
+                        # stop() sets _stop_event; must clear it before restart
+                        client._stop_event.clear()
+                        client._give_up = False
+                        client._first_frame_logged = False
                         client.start()
-                        status["stale"] = True
 
                     if not status["connected"] and self._state == AutoflowState.STREAMING:
                         logger.warning("[AUTOFLOW] NTRIP disconnected — awaiting reconnect...")
